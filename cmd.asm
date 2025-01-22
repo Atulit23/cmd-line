@@ -13,6 +13,8 @@ section .data
     mode equ 0644    ; File permissions (rw-r--r--)
     
     echo db "echo", 0
+    cat  db "cat",  0
+
     exits db "exit", 0
     
     current equ 5
@@ -35,6 +37,8 @@ section .data
 section .bss
     input resb 128
     subs resb 128
+    buffer resb 4096 
+    fd resd 1                   
 
 section .text
     global _start
@@ -93,6 +97,13 @@ main:
     mov ecx, 5
     repe cmpsb
     je execute_touch
+
+    ;cat
+    mov esi, input
+    mov edi, cat
+    mov ecx, 3
+    repe cmpsb
+    je execute_cat
     
     ; Unknown command
     mov eax, 4
@@ -107,12 +118,13 @@ execute_echo:
     mov esi, 5
     xor ecx, ecx
     
+    ; Clear subs buffer
     mov edi, subs
     mov ecx, 128
     xor al, al
     rep stosb
     
-    jmp substring
+    xor ecx, ecx  ; Reset ECX for the substring loop
 
 substring:
     cmp byte [input + esi], 0
@@ -124,18 +136,92 @@ substring:
     jmp substring
 
 sub_end:
+    mov edx, ecx   
     mov eax, 4
     mov ebx, 1
-    mov ecx, subs
-    mov edx, ecx
+    mov ecx, subs  
     int 0x80
     
+    ; Print newline
     mov eax, 4
     mov ebx, 1
     mov ecx, newline
     mov edx, 1
     int 0x80
     
+    jmp main
+
+execute_cat:
+    mov esi, 4
+    xor ecx, ecx
+    
+    ; Clear subs buffer
+    push edi
+    mov edi, subs
+    mov ecx, 128
+    xor al, al
+    rep stosb
+    pop edi
+    
+    ; Get filename
+    xor ecx, ecx
+
+get_filename_cat:
+    cmp byte [input + esi], 0
+    je add_null_cat
+    mov bl, [input + esi]
+    mov [subs + ecx], bl
+    inc esi
+    inc ecx
+    jmp get_filename_cat
+
+add_null_cat:
+    mov byte [subs + ecx], 0  
+
+    mov eax, 5
+    mov ebx, subs
+    mov ecx, 0  ; O_RDONLY
+    int 0x80
+
+    cmp eax, 0
+    jl error
+
+    mov [fd], eax
+    jmp read_loop
+
+read_loop:
+    mov eax, 3  ; syscall number for read                 
+    mov ebx, [fd]               
+    mov ecx, buffer             
+    mov edx, 4096                
+    int 0x80                     
+
+    ; Check read result
+    cmp eax, 0                   
+    jle close_file
+
+    ; Write to stdout using sys_write
+    mov edx, eax                
+    mov eax, 4                   
+    mov ebx, 1                   
+    mov ecx, buffer              
+    int 0x80                     
+
+    jmp read_loop
+
+close_file:
+    mov eax, 6                 
+    mov ebx, [fd]               
+    int 0x80   
+
+    mov edi, subs
+    mov ecx, 128
+    xor al, al
+    rep stosb                
+
+    jmp main
+
+error:
     jmp main
 
 execute_touch:
@@ -156,6 +242,15 @@ execute_touch:
 get_filename:
     cmp byte [input + esi], 0
     je create_file
+    mov bl, [input + esi]
+    mov [subs + ecx], bl
+    inc esi
+    inc ecx
+    jmp get_filename
+
+get_filename_sub:
+    cmp byte [input + esi], 0
+    je execute_cat
     mov bl, [input + esi]
     mov [subs + ecx], bl
     inc esi
