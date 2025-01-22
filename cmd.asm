@@ -2,6 +2,8 @@ section .data
     newline db 0xA
     prompt db "shell> ", 0
     len equ $ - prompt
+    clear_seq db 0x1B, '[2J', 0x1B, '[3J', 0x1B, '[H'  ; ANSI sequence
+    clear_len equ $ - clear_seq   
     
     ls db "ls", 0
     command db "/usr/bin/ls", 0
@@ -14,10 +16,26 @@ section .data
     
     echo db "echo", 0
     cat  db "cat",  0
-
+    mkdir db "mkdir", 0
+    rmdir db "rmdir", 0
+    rm db "rm", 0
+    clear db "clear", 0
+    cd db "cd", 0
+    
     exits db "exit", 0
     
     current equ 5
+
+    rm_command db "/bin/rm", 0
+    rm_arg_r  db "-r", 0
+    rmdir_error   db "Failed to remove directory", 0xA
+    rmdir_err_len equ $ - rmdir_error
+
+    args_rm:
+        dd rm_command    
+        dd rm_arg_r      
+        dd subs          
+        dd 0    
     
     args_ls:
         dd command
@@ -104,6 +122,41 @@ main:
     mov ecx, 3
     repe cmpsb
     je execute_cat
+
+    ;mkdir
+    mov esi, input
+    mov edi, mkdir
+    mov ecx, 5
+    repe cmpsb
+    je execute_mkdir
+
+    ;mkdir
+    mov esi, input
+    mov edi, rmdir
+    mov ecx, 5
+    repe cmpsb
+    je execute_rmdir
+
+    ;rm 
+    mov esi, input
+    mov edi, rm
+    mov ecx, 2
+    repe cmpsb
+    je execute_rm
+
+    ;clear 
+    mov esi, input
+    mov edi, clear
+    mov ecx, 5
+    repe cmpsb
+    je execute_clear 
+
+    ;cd 
+    mov esi, input
+    mov edi, cd
+    mov ecx, 2
+    repe cmpsb
+    je execute_cd 
     
     ; Unknown command
     mov eax, 4
@@ -112,6 +165,42 @@ main:
     mov edx, unknown_len
     int 0x80
     
+    jmp main
+
+execute_cd:
+    mov esi, 3
+    xor ecx, ecx
+
+    push edi
+    mov edi, subs
+    mov ecx, 128
+    xor eax, eax
+    rep stosb
+    pop edi
+
+    xor ecx, ecx
+
+get_foldername_cd:
+    cmp byte [input + esi], 0
+    je cd_main
+
+    mov bl, [input + esi]
+    mov [subs + ecx], bl
+
+    inc esi 
+    inc ecx
+
+    jmp get_foldername_cd
+
+cd_main:
+    mov byte [subs + ecx], 0  
+
+    mov eax, 12 ;syscall code for changing directory
+    mov ebx, subs
+    int 0x80
+
+    call execute_pwd
+
     jmp main
 
 execute_echo:
@@ -129,10 +218,13 @@ execute_echo:
 substring:
     cmp byte [input + esi], 0
     je sub_end
+
     mov bl, [input + esi]    
     mov [subs + ecx], bl
+
     inc esi
     inc ecx
+
     jmp substring
 
 sub_end:
@@ -224,6 +316,168 @@ close_file:
 error:
     jmp main
 
+execute_mkdir:
+    mov esi, 6
+
+    ; Clear subs buffer
+    push edi
+    mov edi, subs
+    mov ecx, 128
+    xor al, al
+    rep stosb
+    pop edi
+    
+    ; Get filename
+    xor ecx, ecx
+
+get_filename_mkdir:
+    cmp byte [input + esi], 0
+    je mkdir_main
+
+    mov bl, [input + esi]
+    mov [subs + ecx], bl
+    inc esi
+    inc ecx
+
+    jmp get_filename_mkdir
+
+; creating directory here
+mkdir_main:
+    mov byte [subs + ecx], 0  
+
+    mov eax, 39 ; syscall number for creating a directory
+    mov ebx, subs
+    mov ecx, 0o755
+    int 0x80 
+
+    jmp main
+
+execute_rmdir:
+    mov esi, 6           
+    xor ecx, ecx         
+
+    ; Clear the subs buffer (optional but safer)
+    push edi             
+    mov edi, subs        
+    xor eax, eax         
+    mov ecx, 128        
+    rep stosb            
+    pop edi       
+
+    xor ecx, ecx         
+
+get_filename_rmdir:
+    cmp byte [input + esi], 0  
+    je rmdir_main              
+    cmp byte [input + esi], ' '
+    je rmdir_main              
+
+    mov al, [input + esi]
+    mov [subs + ecx], al
+    inc esi
+    inc ecx
+    jmp get_filename_rmdir
+
+rmdir_main:
+    mov byte [subs + ecx], 0
+
+    mov eax, 40          
+    mov ebx, subs
+    int 0x80
+
+    test eax, eax
+    js handle_rmdir_error        
+
+    jmp main             
+
+handle_rmdir_error:
+    ; Check if error is "Directory not empty" (errno 39)
+    cmp eax, -39
+    jne print_rmdir_error 
+
+    ; Fork to execute /bin/rm -r <directory>
+    mov eax, 2  ; syscall number for fork         
+    int 0x80
+    test eax, eax
+    jz child_rm_r        
+
+    mov eax, 7   ; Syscall 7: waitpid       
+    mov ebx, -1  ; Wait for any child        
+    xor ecx, ecx         
+    xor edx, edx        
+    int 0x80
+    jmp main             
+
+child_rm_r:
+    mov eax, 11   ; syscall 11, exceve (used to call predefined commands)      
+    mov ebx, rm_command  
+    mov ecx, args_rm    
+    mov edx, empty_environ 
+    int 0x80
+
+    mov eax, 1
+    mov ebx, 1
+    int 0x80
+
+print_rmdir_error:
+    mov eax, 4
+    mov ebx, 1
+    mov ecx, rmdir_error
+    mov edx, rmdir_err_len
+    int 0x80
+    jmp main
+
+execute_clear:
+    mov eax, 4
+    mov ebx, 1
+    mov ecx, clear_seq
+    mov edx, clear_len
+    int 0x80
+
+    jmp main
+
+execute_rm:
+    mov esi, 3
+    xor ecx, ecx
+
+    push edi
+    mov edi, subs
+    xor eax, eax
+    mov ecx, 128
+    repe stosb
+    pop edi
+
+    xor ecx, ecx
+
+get_filename_rm:
+    cmp byte [input + esi], 0
+    je main_rm
+
+    mov bl, [input + esi]
+    mov [subs + ecx], bl
+
+    inc esi
+    inc ecx
+
+    jmp get_filename_rm
+
+main_rm:
+    mov byte [subs + ecx], 0
+
+    mov eax, 10
+    mov ebx, subs
+    int 0x80
+
+    test eax, eax
+    js exit_rm
+
+    jmp main
+
+exit_rm:
+    mov eax, 1
+    xor ebx, ebx
+    int 0x80
+
 execute_touch:
     mov esi, 6              
     xor ecx, ecx
@@ -279,7 +533,7 @@ error_creating:
     jmp main
 
 execute_ls:
-    mov eax, 2    
+    mov eax, 2  ;syscall 2 is for fork (to hold the current process)
     int 0x80
     test eax, eax
     jz child_ls   
